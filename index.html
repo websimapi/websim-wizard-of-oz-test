@@ -160,6 +160,21 @@
       margin-left: auto;
       font-weight: bold;
     }
+    
+    .countdown {
+      text-align: center;
+      font-size: 24px;
+      font-weight: bold;
+      margin: 20px 0;
+      color: #6200ee;
+    }
+    
+    .matchmaking-status {
+      text-align: center;
+      font-size: 18px;
+      margin: 15px 0;
+      color: #555;
+    }
   </style>
 </head>
 <body>
@@ -182,10 +197,13 @@
       const [stats, setStats] = useState({ wins: 0, losses: 0, totalGames: 0 });
       const [leaderboard, setLeaderboard] = useState([]);
       const [aiConversationHistory, setAiConversationHistory] = useState([]);
+      const [lobbyCountdown, setLobbyCountdown] = useState(15);
+      const [matchmakingStatus, setMatchmakingStatus] = useState('');
       
       const room = useRef(new WebsimSocket()).current;
       const chatContainerRef = useRef(null);
       const timerRef = useRef(null);
+      const lobbyTimerRef = useRef(null);
       
       // Initialize room on component mount
       useEffect(() => {
@@ -194,7 +212,13 @@
           
           // Subscribe to presence changes to handle matchmaking
           room.subscribePresence((presence) => {
-            // Handle presence updates for matchmaking
+            // Update presence to show we're in the lobby
+            if (view === 'lobby' && !isMatching) {
+              room.updatePresence({
+                status: 'lobby',
+                joinedAt: new Date().getTime()
+              });
+            }
           });
           
           // Handle messages for chat and game events
@@ -235,14 +259,123 @@
           const leaderboardData = room.collection('player_stats').getList();
           leaderboardData.sort((a, b) => b.wins - a.wins);
           setLeaderboard(leaderboardData.slice(0, 10));
+          
+          // Update presence to show we're in the lobby
+          room.updatePresence({
+            status: 'lobby',
+            joinedAt: new Date().getTime()
+          });
+          
+          // Start the lobby countdown timer
+          startLobbyCountdown();
         };
         
         initializeRoom();
         
         return () => {
           if (timerRef.current) clearInterval(timerRef.current);
+          if (lobbyTimerRef.current) clearInterval(lobbyTimerRef.current);
         };
       }, []);
+      
+      // Start the lobby countdown timer
+      const startLobbyCountdown = () => {
+        setLobbyCountdown(15);
+        setMatchmakingStatus('Matching will begin soon...');
+        
+        if (lobbyTimerRef.current) clearInterval(lobbyTimerRef.current);
+        
+        lobbyTimerRef.current = setInterval(() => {
+          setLobbyCountdown(prev => {
+            if (prev <= 1) {
+              clearInterval(lobbyTimerRef.current);
+              // Trigger automatic matchmaking
+              automaticMatch();
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      };
+      
+      // Automatic match function
+      const automaticMatch = async () => {
+        if (view !== 'lobby' || isMatching) return;
+        
+        setIsMatching(true);
+        setMatchmakingStatus('Rolling the dice...');
+        
+        // Random decision: 50% chance for human, 50% chance for AI
+        const preferHuman = Math.random() < 0.5;
+        
+        if (preferHuman) {
+          // Try to find other players in lobby
+          const playersInLobby = Object.values(room.presence)
+            .filter(p => p.status === 'lobby' && p.clientId !== room.clientId);
+          
+          if (playersInLobby.length > 0) {
+            // Match with random human player
+            const randomPlayer = playersInLobby[Math.floor(Math.random() * playersInLobby.length)];
+            
+            // Both players update their presence to 'matched'
+            room.updatePresence({
+              status: 'matched',
+              matchedWith: randomPlayer.clientId,
+              isAI: false
+            });
+            
+            // Notify the other player
+            room.send({
+              type: 'game_start',
+              opponent: room.peers[room.clientId],
+              isAI: false
+            });
+            
+            setMatchmakingStatus('Found a human partner!');
+            
+            // Start game with the matched player
+            startGame(room.peers[randomPlayer.clientId], false);
+          } else {
+            // No humans available, use AI
+            setIsAI(true);
+            
+            // Update presence
+            room.updatePresence({
+              status: 'matched',
+              matchedWith: 'ai',
+              isAI: true
+            });
+            
+            setMatchmakingStatus('No humans available. Matching with AI...');
+            
+            // Start game with AI
+            startGame({ 
+              username: generateAIUsername(),
+              avatarUrl: `https://images.websim.ai/avatar/ai_user_${Math.floor(Math.random() * 1000)}`,
+              id: 'ai'
+            }, true);
+          }
+        } else {
+          // Match with AI
+          setIsAI(true);
+          
+          // Update presence
+          room.updatePresence({
+            status: 'matched',
+            matchedWith: 'ai',
+            isAI: true
+          });
+          
+          setMatchmakingStatus('Rolled AI. Matching with AI...');
+          
+          // Start game with AI
+          startGame({ 
+            username: generateAIUsername(),
+            avatarUrl: `https://images.websim.ai/avatar/ai_user_${Math.floor(Math.random() * 1000)}`,
+            id: 'ai'
+          }, true);
+        }
+      };
       
       // Auto-scroll chat to bottom when new messages arrive
       useEffect(() => {
@@ -277,52 +410,14 @@
         }
       }, [timeLeft, view]);
       
-      const findMatch = async () => {
-        setIsMatching(true);
-        
-        // Check for other players in lobby
-        const playersInLobby = Object.values(room.presence)
-          .filter(p => p.status === 'lobby' && p.clientId !== room.clientId);
-        
-        if (playersInLobby.length > 0) {
-          // Match with random human player
-          const randomPlayer = playersInLobby[Math.floor(Math.random() * playersInLobby.length)];
-          
-          // Both players update their presence to 'matched'
-          room.updatePresence({
-            status: 'matched',
-            matchedWith: randomPlayer.clientId,
-            isAI: false
-          });
-          
-          // Notify the other player
-          room.send({
-            type: 'game_start',
-            opponent: room.peers[room.clientId],
-            isAI: false
-          });
-          
-          // Start game with the matched player
-          startGame(room.peers[randomPlayer.clientId], false);
+      // Reset lobby timer when view changes
+      useEffect(() => {
+        if (view === 'lobby' && !isMatching) {
+          startLobbyCountdown();
         } else {
-          // Match with AI
-          setIsAI(true);
-          
-          // Update presence
-          room.updatePresence({
-            status: 'matched',
-            matchedWith: 'ai',
-            isAI: true
-          });
-          
-          // Start game with AI
-          startGame({ 
-            username: generateAIUsername(),
-            avatarUrl: `https://images.websim.ai/avatar/ai_user_${Math.floor(Math.random() * 1000)}`,
-            id: 'ai'
-          }, true);
+          if (lobbyTimerRef.current) clearInterval(lobbyTimerRef.current);
         }
-      };
+      }, [view, isMatching]);
       
       const generateAIUsername = () => {
         const names = ['Alex', 'Sam', 'Taylor', 'Jordan', 'Riley', 'Casey', 'Morgan', 'Quinn', 'Skyler', 'Dakota'];
@@ -336,6 +431,8 @@
         setMessages([]);
         setView('game');
         setIsMatching(false);
+        
+        if (lobbyTimerRef.current) clearInterval(lobbyTimerRef.current);
       };
       
       const endGame = (results) => {
@@ -477,6 +574,15 @@
         setYourVote(null);
         setOpponentVote(null);
         setGameResults(null);
+        
+        // Update presence to show we're in the lobby again
+        room.updatePresence({
+          status: 'lobby',
+          joinedAt: new Date().getTime()
+        });
+        
+        // Start the lobby countdown timer again
+        startLobbyCountdown();
       };
       
       return (
@@ -488,11 +594,13 @@
               <h2>Welcome to the Human or AI Test</h2>
               <p>You will be matched with either another player or an AI. You have 60 seconds to chat and decide if they are human or AI.</p>
               
-              {!isMatching ? (
-                <button onClick={findMatch}>Find a Match</button>
-              ) : (
-                <div className="loading">Finding you a match...</div>
-              )}
+              <div className="countdown">
+                Matching in: {lobbyCountdown} seconds
+              </div>
+              
+              <div className="matchmaking-status">
+                {matchmakingStatus}
+              </div>
               
               {leaderboard.length > 0 && (
                 <div className="leaderboard">
@@ -612,4 +720,3 @@
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
-
