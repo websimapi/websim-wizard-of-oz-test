@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wizard of Oz Test</title>
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      margin: 0;
+      padding: 0;
+      background-color: #f5f5f5;
+      color: #333;
+    }
+    
+    #app {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    
+    .lobby, .game, .results {
+      background-color: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+    
+    h1 {
+      text-align: center;
+      color: #6200ee;
+    }
+    
+    .timer {
+      text-align: center;
+      font-size: 24px;
+      font-weight: bold;
+      margin: 10px 0;
+      color: #6200ee;
+    }
+    
+    .chat-container {
+      height: 300px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      background-color: #f9f9f9;
+    }
+    
+    .message {
+      margin-bottom: 10px;
+      padding: 8px 12px;
+      border-radius: 18px;
+      max-width: 70%;
+      word-wrap: break-word;
+    }
+    
+    .message.other {
+      background-color: #e1e1e1;
+      align-self: flex-start;
+      margin-right: auto;
+    }
+    
+    .message.self {
+      background-color: #6200ee;
+      color: white;
+      align-self: flex-end;
+      margin-left: auto;
+    }
+    
+    .messages {
+      display: flex;
+      flex-direction: column;
+    }
+    
+    .message-input {
+      display: flex;
+      margin-top: 10px;
+    }
+    
+    .message-input input {
+      flex-grow: 1;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-right: 10px;
+      font-size: 16px;
+    }
+    
+    button {
+      background-color: #6200ee;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      padding: 10px 20px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background-color 0.3s;
+    }
+    
+    button:hover {
+      background-color: #3700b3;
+    }
+    
+    button:disabled {
+      background-color: #b39ddb;
+      cursor: not-allowed;
+    }
+    
+    .vote-options {
+      display: flex;
+      justify-content: space-around;
+      margin: 20px 0;
+    }
+    
+    .loading {
+      text-align: center;
+      font-size: 18px;
+      margin: 20px 0;
+    }
+    
+    .stats {
+      margin-top: 20px;
+      padding: 10px;
+      background-color: #f0f0f0;
+      border-radius: 8px;
+    }
+    
+    .user-avatar {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      margin-right: 10px;
+      vertical-align: middle;
+    }
+    
+    .message-header {
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+    
+    .leaderboard {
+      margin-top: 20px;
+    }
+    
+    .leaderboard-item {
+      display: flex;
+      align-items: center;
+      padding: 8px;
+      border-bottom: 1px solid #eee;
+    }
+    
+    .score {
+      margin-left: auto;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    
+    function App() {
+      const [view, setView] = useState('lobby');
+      const [pairedWith, setPairedWith] = useState(null);
+      const [isAI, setIsAI] = useState(false);
+      const [timeLeft, setTimeLeft] = useState(60);
+      const [messages, setMessages] = useState([]);
+      const [inputMessage, setInputMessage] = useState('');
+      const [isMatching, setIsMatching] = useState(false);
+      const [yourVote, setYourVote] = useState(null);
+      const [opponentVote, setOpponentVote] = useState(null);
+      const [gameResults, setGameResults] = useState(null);
+      const [stats, setStats] = useState({ wins: 0, losses: 0, totalGames: 0 });
+      const [leaderboard, setLeaderboard] = useState([]);
+      const [aiConversationHistory, setAiConversationHistory] = useState([]);
+      
+      const room = useRef(new WebsimSocket()).current;
+      const chatContainerRef = useRef(null);
+      const timerRef = useRef(null);
+      
+      // Initialize room on component mount
+      useEffect(() => {
+        const initializeRoom = async () => {
+          await room.initialize();
+          
+          // Subscribe to presence changes to handle matchmaking
+          room.subscribePresence((presence) => {
+            // Handle presence updates for matchmaking
+          });
+          
+          // Handle messages for chat and game events
+          room.onmessage = (event) => {
+            const data = event.data;
+            
+            if (data.type === 'chat_message') {
+              setMessages(prev => [...prev, {
+                sender: data.clientId === room.clientId ? 'self' : 'other',
+                username: data.username,
+                text: data.text,
+                avatarUrl: data.avatarUrl
+              }]);
+              
+              if (isAI && data.clientId !== room.clientId) {
+                handleAIResponse(data.text);
+              }
+            } else if (data.type === 'game_start') {
+              startGame(data.opponent, data.isAI);
+            } else if (data.type === 'game_end') {
+              endGame(data.results);
+            } else if (data.type === 'vote') {
+              setOpponentVote(data.vote);
+            }
+          };
+          
+          // Fetch past chat history from database for AI learning
+          const chatHistory = room.collection('chat_history').getList();
+          setAiConversationHistory(chatHistory);
+          
+          // Fetch player stats
+          const playerStats = room.collection('player_stats').filter({ username: room.peers[room.clientId].username }).getList();
+          if (playerStats.length > 0) {
+            setStats(playerStats[0]);
+          }
+          
+          // Fetch leaderboard
+          const leaderboardData = room.collection('player_stats').getList();
+          leaderboardData.sort((a, b) => b.wins - a.wins);
+          setLeaderboard(leaderboardData.slice(0, 10));
+        };
+        
+        initializeRoom();
+        
+        return () => {
+          if (timerRef.current) clearInterval(timerRef.current);
+        };
+      }, []);
+      
+      // Auto-scroll chat to bottom when new messages arrive
+      useEffect(() => {
+        if (chatContainerRef.current) {
+          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+      }, [messages]);
+      
+      // Start timer when game begins
+      useEffect(() => {
+        if (view === 'game' && timeLeft > 0) {
+          timerRef.current = setInterval(() => {
+            setTimeLeft(prev => {
+              if (prev <= 1) {
+                clearInterval(timerRef.current);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+        }
+        
+        return () => {
+          if (timerRef.current) clearInterval(timerRef.current);
+        };
+      }, [view, timeLeft]);
+      
+      // Handle time running out
+      useEffect(() => {
+        if (timeLeft === 0 && view === 'game') {
+          setView('voting');
+        }
+      }, [timeLeft, view]);
+      
+      const findMatch = async () => {
+        setIsMatching(true);
+        
+        // Check for other players in lobby
+        const playersInLobby = Object.values(room.presence)
+          .filter(p => p.status === 'lobby' && p.clientId !== room.clientId);
+        
+        if (playersInLobby.length > 0) {
+          // Match with random human player
+          const randomPlayer = playersInLobby[Math.floor(Math.random() * playersInLobby.length)];
+          
+          // Both players update their presence to 'matched'
+          room.updatePresence({
+            status: 'matched',
+            matchedWith: randomPlayer.clientId,
+            isAI: false
+          });
+          
+          // Notify the other player
+          room.send({
+            type: 'game_start',
+            opponent: room.peers[room.clientId],
+            isAI: false
+          });
+          
+          // Start game with the matched player
+          startGame(room.peers[randomPlayer.clientId], false);
+        } else {
+          // Match with AI
+          setIsAI(true);
+          
+          // Update presence
+          room.updatePresence({
+            status: 'matched',
+            matchedWith: 'ai',
+            isAI: true
+          });
+          
+          // Start game with AI
+          startGame({ 
+            username: generateAIUsername(),
+            avatarUrl: `https://images.websim.ai/avatar/ai_user_${Math.floor(Math.random() * 1000)}`,
+            id: 'ai'
+          }, true);
+        }
+      };
+      
+      const generateAIUsername = () => {
+        const names = ['Alex', 'Sam', 'Taylor', 'Jordan', 'Riley', 'Casey', 'Morgan', 'Quinn', 'Skyler', 'Dakota'];
+        return names[Math.floor(Math.random() * names.length)] + Math.floor(Math.random() * 1000);
+      };
+      
+      const startGame = (opponent, withAI) => {
+        setPairedWith(opponent);
+        setIsAI(withAI);
+        setTimeLeft(60);
+        setMessages([]);
+        setView('game');
+        setIsMatching(false);
+      };
+      
+      const endGame = (results) => {
+        setGameResults(results);
+        setView('results');
+        
+        // Update stats in database
+        updatePlayerStats(results);
+      };
+      
+      const handleSendMessage = () => {
+        if (!inputMessage.trim()) return;
+        
+        // Add message to UI
+        const newMessage = {
+          sender: 'self',
+          username: room.peers[room.clientId].username,
+          text: inputMessage,
+          avatarUrl: room.peers[room.clientId].avatarUrl
+        };
+        
+        setMessages(prev => [...prev, newMessage]);
+        
+        // Save to database for AI learning
+        room.collection('chat_history').create({
+          text: inputMessage,
+          context: isAI ? 'human_to_ai' : 'human_to_human',
+          gameId: `${room.clientId}_${new Date().getTime()}`
+        });
+        
+        // Send to opponent if human
+        if (!isAI) {
+          room.send({
+            type: 'chat_message',
+            text: inputMessage,
+            clientId: room.clientId,
+            username: room.peers[room.clientId].username,
+            avatarUrl: room.peers[room.clientId].avatarUrl
+          });
+        } else {
+          // If opponent is AI, generate AI response
+          handleAIResponse(inputMessage);
+        }
+        
+        setInputMessage('');
+      };
+      
+      const handleAIResponse = async (userMessage) => {
+        // Add user message to conversation history
+        const updatedHistory = [...aiConversationHistory, {
+          role: "user",
+          content: userMessage
+        }];
+        
+        try {
+          // Get AI response
+          const completion = await websim.chat.completions.create({
+            messages: [
+              {
+                role: "system",
+                content: "You are a human participant in a Turing test. Your goal is to convince the other person that you are human, not an AI. Be conversational, use natural language, maybe include typos occasionally, and don't be too perfect or formal. Respond in 1-2 sentences maximum to keep the conversation flowing naturally. Never say you're an AI or admit to being artificial.",
+              },
+              ...updatedHistory.slice(-5) // Keep the most recent messages
+            ],
+          });
+          
+          const aiResponse = completion.content;
+          
+          // Add AI response to conversation history
+          setAiConversationHistory([...updatedHistory, {
+            role: "assistant",
+            content: aiResponse
+          }]);
+          
+          // Save to database for AI learning
+          room.collection('chat_history').create({
+            text: aiResponse,
+            context: 'ai_to_human',
+            gameId: `${room.clientId}_${new Date().getTime()}`
+          });
+          
+          // Add AI message to UI after a small delay to seem more human
+          setTimeout(() => {
+            setMessages(prev => [...prev, {
+              sender: 'other',
+              username: pairedWith.username,
+              text: aiResponse,
+              avatarUrl: pairedWith.avatarUrl
+            }]);
+          }, Math.random() * 1000 + 500);
+        } catch (error) {
+          console.error("Error getting AI response:", error);
+        }
+      };
+      
+      const submitVote = (vote) => {
+        setYourVote(vote);
+        
+        // Send vote to opponent if human
+        if (!isAI) {
+          room.send({
+            type: 'vote',
+            vote: vote,
+            clientId: room.clientId
+          });
+        } else {
+          // If opponent is AI, generate random vote
+          setTimeout(() => {
+            setOpponentVote(Math.random() > 0.5 ? 'human' : 'ai');
+          }, Math.random() * 1000 + 500);
+        }
+      };
+      
+      const updatePlayerStats = (results) => {
+        const isCorrect = (isAI && yourVote === 'ai') || (!isAI && yourVote === 'human');
+        const newStats = {
+          ...stats,
+          wins: isCorrect ? stats.wins + 1 : stats.wins,
+          losses: isCorrect ? stats.losses : stats.losses + 1,
+          totalGames: stats.totalGames + 1
+        };
+        
+        setStats(newStats);
+        
+        // Update in database
+        room.collection('player_stats').create({
+          username: room.peers[room.clientId].username,
+          avatarUrl: room.peers[room.clientId].avatarUrl,
+          ...newStats
+        });
+      };
+      
+      const resetGame = () => {
+        setView('lobby');
+        setPairedWith(null);
+        setIsAI(false);
+        setTimeLeft(60);
+        setMessages([]);
+        setYourVote(null);
+        setOpponentVote(null);
+        setGameResults(null);
+      };
+      
+      return (
+        <div className="app-container">
+          <h1>The Wizard of Oz Test</h1>
+          
+          {view === 'lobby' && (
+            <div className="lobby">
+              <h2>Welcome to the Human or AI Test</h2>
+              <p>You will be matched with either another player or an AI. You have 60 seconds to chat and decide if they are human or AI.</p>
+              
+              {!isMatching ? (
+                <button onClick={findMatch}>Find a Match</button>
+              ) : (
+                <div className="loading">Finding you a match...</div>
+              )}
+              
+              {leaderboard.length > 0 && (
+                <div className="leaderboard">
+                  <h3>Top Players</h3>
+                  {leaderboard.map((player, i) => (
+                    <div className="leaderboard-item" key={i}>
+                      <img src={player.avatarUrl} alt={player.username} className="user-avatar" />
+                      <span>{player.username}</span>
+                      <span className="score">{player.wins} wins</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              
+              <div className="stats">
+                <h3>Your Stats</h3>
+                <p>Wins: {stats.wins} | Losses: {stats.losses} | Total Games: {stats.totalGames}</p>
+              </div>
+            </div>
+          )}
+          
+          {view === 'game' && (
+            <div className="game">
+              <h2>Chatting with {pairedWith.username}</h2>
+              <div className="timer">Time Left: {timeLeft} seconds</div>
+              
+              <div className="chat-container" ref={chatContainerRef}>
+                <div className="messages">
+                  {messages.map((msg, i) => (
+                    <div key={i} className={`message ${msg.sender}`}>
+                      <div className="message-header">
+                        <img src={msg.avatarUrl} alt={msg.username} className="user-avatar" />
+                        {msg.username}
+                      </div>
+                      {msg.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="message-input">
+                <input
+                  type="text"
+                  value={inputMessage}
+                  onChange={e => setInputMessage(e.target.value)}
+                  onKeyPress={e => e.key === 'Enter' && handleSendMessage()}
+                  placeholder="Type your message..."
+                  disabled={timeLeft === 0}
+                />
+                <button onClick={handleSendMessage} disabled={timeLeft === 0}>Send</button>
+              </div>
+            </div>
+          )}
+          
+          {view === 'voting' && (
+            <div className="voting">
+              <h2>Time's Up!</h2>
+              <p>Was {pairedWith.username} a human or an AI?</p>
+              
+              <div className="vote-options">
+                <button 
+                  onClick={() => submitVote('human')} 
+                  disabled={yourVote !== null}
+                  style={yourVote === 'human' ? {backgroundColor: '#4CAF50'} : {}}
+                >
+                  Human
+                </button>
+                <button 
+                  onClick={() => submitVote('ai')} 
+                  disabled={yourVote !== null}
+                  style={yourVote === 'ai' ? {backgroundColor: '#4CAF50'} : {}}
+                >
+                  AI
+                </button>
+              </div>
+              
+              {yourVote && !opponentVote && (
+                <div className="loading">Waiting for other player's vote...</div>
+              )}
+              
+              {yourVote && opponentVote && (
+                <div>
+                  <p>Your opponent thought you were a {opponentVote.toUpperCase()}</p>
+                  <button onClick={() => endGame({ yourVote, opponentVote, isAI })}>See Results</button>
+                </div>
+              )}
+            </div>
+          )}
+          
+          {view === 'results' && (
+            <div className="results">
+              <h2>Game Results</h2>
+              
+              <div>
+                <p>You were talking to a {isAI ? 'AI' : 'HUMAN'}</p>
+                <p>Your guess: {yourVote.toUpperCase()} - {(isAI && yourVote === 'ai') || (!isAI && yourVote === 'human') ? '✓ CORRECT' : '✗ WRONG'}</p>
+                
+                {!isAI && (
+                  <p>Your opponent's guess: {opponentVote.toUpperCase()} - {opponentVote === 'human' ? '✓ CORRECT' : '✗ WRONG'}</p>
+                )}
+              </div>
+              
+              <div className="stats">
+                <h3>Your Stats</h3>
+                <p>Wins: {stats.wins} | Losses: {stats.losses} | Total Games: {stats.totalGames}</p>
+              </div>
+              
+              <button onClick={resetGame}>Play Again</button>
+            </div>
+          )}
+        </div>
+      );
+    }
+    
+    ReactDOM.render(<App />, document.getElementById('app'));
+  </script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+
