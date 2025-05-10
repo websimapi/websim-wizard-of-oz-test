@@ -199,8 +199,10 @@
       const [aiConversationHistory, setAiConversationHistory] = useState([]);
       const [lobbyCountdown, setLobbyCountdown] = useState(15);
       const [matchmakingStatus, setMatchmakingStatus] = useState('');
+      const [roomInitialized, setRoomInitialized] = useState(false);
       
-      const room = useRef(new WebsimSocket()).current;
+      const roomRef = useRef(null);
+      const room = roomRef.current;
       const chatContainerRef = useRef(null);
       const timerRef = useRef(null);
       const lobbyTimerRef = useRef(null);
@@ -208,66 +210,83 @@
       // Initialize room on component mount
       useEffect(() => {
         const initializeRoom = async () => {
-          await room.initialize();
+          roomRef.current = new WebsimSocket();
+          const room = roomRef.current;
           
-          // Subscribe to presence changes to handle matchmaking
-          room.subscribePresence((presence) => {
+          try {
+            await room.initialize();
+            setRoomInitialized(true);
+            
+            // Subscribe to presence changes to handle matchmaking
+            room.subscribePresence((presence) => {
+              // Update presence to show we're in the lobby
+              if (view === 'lobby' && !isMatching && room && room.clientId) {
+                room.updatePresence({
+                  status: 'lobby',
+                  joinedAt: new Date().getTime()
+                });
+              }
+            });
+            
+            // Handle messages for chat and game events
+            room.onmessage = (event) => {
+              const data = event.data;
+              
+              if (data.type === 'chat_message') {
+                setMessages(prev => [...prev, {
+                  sender: data.clientId === room.clientId ? 'self' : 'other',
+                  username: data.username,
+                  text: data.text,
+                  avatarUrl: data.avatarUrl
+                }]);
+                
+                if (isAI && data.clientId !== room.clientId) {
+                  handleAIResponse(data.text);
+                }
+              } else if (data.type === 'game_start') {
+                startGame(data.opponent, data.isAI);
+              } else if (data.type === 'game_end') {
+                endGame(data.results);
+              } else if (data.type === 'vote') {
+                setOpponentVote(data.vote);
+              }
+            };
+            
+            // Fetch past chat history from database for AI learning
+            const chatHistory = room.collection('chat_history').getList();
+            setAiConversationHistory(chatHistory);
+            
+            // Fetch player stats
+            if (room.peers && room.clientId && room.peers[room.clientId]) {
+              const playerStats = room.collection('player_stats').filter({ 
+                username: room.peers[room.clientId].username 
+              }).getList();
+              
+              if (playerStats && playerStats.length > 0) {
+                setStats(playerStats[0]);
+              }
+            }
+            
+            // Fetch leaderboard
+            const leaderboardData = room.collection('player_stats').getList();
+            if (leaderboardData && leaderboardData.length > 0) {
+              leaderboardData.sort((a, b) => b.wins - a.wins);
+              setLeaderboard(leaderboardData.slice(0, 10));
+            }
+            
             // Update presence to show we're in the lobby
-            if (view === 'lobby' && !isMatching) {
+            if (room && room.clientId) {
               room.updatePresence({
                 status: 'lobby',
                 joinedAt: new Date().getTime()
               });
             }
-          });
-          
-          // Handle messages for chat and game events
-          room.onmessage = (event) => {
-            const data = event.data;
             
-            if (data.type === 'chat_message') {
-              setMessages(prev => [...prev, {
-                sender: data.clientId === room.clientId ? 'self' : 'other',
-                username: data.username,
-                text: data.text,
-                avatarUrl: data.avatarUrl
-              }]);
-              
-              if (isAI && data.clientId !== room.clientId) {
-                handleAIResponse(data.text);
-              }
-            } else if (data.type === 'game_start') {
-              startGame(data.opponent, data.isAI);
-            } else if (data.type === 'game_end') {
-              endGame(data.results);
-            } else if (data.type === 'vote') {
-              setOpponentVote(data.vote);
-            }
-          };
-          
-          // Fetch past chat history from database for AI learning
-          const chatHistory = room.collection('chat_history').getList();
-          setAiConversationHistory(chatHistory);
-          
-          // Fetch player stats
-          const playerStats = room.collection('player_stats').filter({ username: room.peers[room.clientId].username }).getList();
-          if (playerStats.length > 0) {
-            setStats(playerStats[0]);
+            // Start the lobby countdown timer
+            startLobbyCountdown();
+          } catch (error) {
+            console.error("Error initializing room:", error);
           }
-          
-          // Fetch leaderboard
-          const leaderboardData = room.collection('player_stats').getList();
-          leaderboardData.sort((a, b) => b.wins - a.wins);
-          setLeaderboard(leaderboardData.slice(0, 10));
-          
-          // Update presence to show we're in the lobby
-          room.updatePresence({
-            status: 'lobby',
-            joinedAt: new Date().getTime()
-          });
-          
-          // Start the lobby countdown timer
-          startLobbyCountdown();
         };
         
         initializeRoom();
@@ -300,7 +319,9 @@
       
       // Automatic match function
       const automaticMatch = async () => {
-        if (view !== 'lobby' || isMatching) return;
+        if (view !== 'lobby' || isMatching || !roomInitialized || !roomRef.current) return;
+        
+        const room = roomRef.current;
         
         setIsMatching(true);
         setMatchmakingStatus('Rolling the dice...');
@@ -310,8 +331,9 @@
         
         if (preferHuman) {
           // Try to find other players in lobby
-          const playersInLobby = Object.values(room.presence)
-            .filter(p => p.status === 'lobby' && p.clientId !== room.clientId);
+          const playersInLobby = room.presence ? Object.entries(room.presence)
+            .filter(([clientId, p]) => p && p.status === 'lobby' && clientId !== room.clientId)
+            .map(([clientId, p]) => ({ clientId, ...p })) : [];
           
           if (playersInLobby.length > 0) {
             // Match with random human player
@@ -324,17 +346,29 @@
               isAI: false
             });
             
-            // Notify the other player
-            room.send({
-              type: 'game_start',
-              opponent: room.peers[room.clientId],
-              isAI: false
-            });
+            // Make sure the peer exists before proceeding
+            if (room.peers && room.clientId && room.peers[room.clientId]) {
+              // Notify the other player
+              room.send({
+                type: 'game_start',
+                opponent: room.peers[room.clientId],
+                isAI: false
+              });
+            }
             
             setMatchmakingStatus('Found a human partner!');
             
             // Start game with the matched player
-            startGame(room.peers[randomPlayer.clientId], false);
+            if (room.peers && randomPlayer.clientId && room.peers[randomPlayer.clientId]) {
+              startGame(room.peers[randomPlayer.clientId], false);
+            } else {
+              // Fallback if peer doesn't exist
+              startGame({ 
+                username: "Human Player",
+                avatarUrl: "https://images.websim.ai/avatar/default_user",
+                id: randomPlayer.clientId
+              }, false);
+            }
           } else {
             // No humans available, use AI
             setIsAI(true);
@@ -444,24 +478,34 @@
       };
       
       const handleSendMessage = () => {
-        if (!inputMessage.trim()) return;
+        if (!inputMessage.trim() || !roomInitialized || !roomRef.current) return;
+        
+        const room = roomRef.current;
+        const username = room.peers && room.clientId && room.peers[room.clientId] ? 
+                         room.peers[room.clientId].username : "Unknown User";
+        const avatarUrl = room.peers && room.clientId && room.peers[room.clientId] ? 
+                          room.peers[room.clientId].avatarUrl : "https://images.websim.ai/avatar/default_user";
         
         // Add message to UI
         const newMessage = {
           sender: 'self',
-          username: room.peers[room.clientId].username,
+          username: username,
           text: inputMessage,
-          avatarUrl: room.peers[room.clientId].avatarUrl
+          avatarUrl: avatarUrl
         };
         
         setMessages(prev => [...prev, newMessage]);
         
         // Save to database for AI learning
-        room.collection('chat_history').create({
-          text: inputMessage,
-          context: isAI ? 'human_to_ai' : 'human_to_human',
-          gameId: `${room.clientId}_${new Date().getTime()}`
-        });
+        try {
+          room.collection('chat_history').create({
+            text: inputMessage,
+            context: isAI ? 'human_to_ai' : 'human_to_human',
+            gameId: `${room.clientId}_${new Date().getTime()}`
+          });
+        } catch (error) {
+          console.error("Error saving chat to database:", error);
+        }
         
         // Send to opponent if human
         if (!isAI) {
@@ -469,8 +513,8 @@
             type: 'chat_message',
             text: inputMessage,
             clientId: room.clientId,
-            username: room.peers[room.clientId].username,
-            avatarUrl: room.peers[room.clientId].avatarUrl
+            username: username,
+            avatarUrl: avatarUrl
           });
         } else {
           // If opponent is AI, generate AI response
@@ -481,6 +525,8 @@
       };
       
       const handleAIResponse = async (userMessage) => {
+        if (!roomInitialized) return;
+        
         // Add user message to conversation history
         const updatedHistory = [...aiConversationHistory, {
           role: "user",
@@ -508,20 +554,28 @@
           }]);
           
           // Save to database for AI learning
-          room.collection('chat_history').create({
-            text: aiResponse,
-            context: 'ai_to_human',
-            gameId: `${room.clientId}_${new Date().getTime()}`
-          });
+          if (roomInitialized && roomRef.current) {
+            try {
+              roomRef.current.collection('chat_history').create({
+                text: aiResponse,
+                context: 'ai_to_human',
+                gameId: `${roomRef.current.clientId}_${new Date().getTime()}`
+              });
+            } catch (error) {
+              console.error("Error saving AI response to database:", error);
+            }
+          }
           
           // Add AI message to UI after a small delay to seem more human
           setTimeout(() => {
-            setMessages(prev => [...prev, {
-              sender: 'other',
-              username: pairedWith.username,
-              text: aiResponse,
-              avatarUrl: pairedWith.avatarUrl
-            }]);
+            if (pairedWith) {
+              setMessages(prev => [...prev, {
+                sender: 'other',
+                username: pairedWith.username,
+                text: aiResponse,
+                avatarUrl: pairedWith.avatarUrl
+              }]);
+            }
           }, Math.random() * 1000 + 500);
         } catch (error) {
           console.error("Error getting AI response:", error);
@@ -532,11 +586,11 @@
         setYourVote(vote);
         
         // Send vote to opponent if human
-        if (!isAI) {
-          room.send({
+        if (!isAI && roomInitialized && roomRef.current) {
+          roomRef.current.send({
             type: 'vote',
             vote: vote,
-            clientId: room.clientId
+            clientId: roomRef.current.clientId
           });
         } else {
           // If opponent is AI, generate random vote
@@ -547,6 +601,10 @@
       };
       
       const updatePlayerStats = (results) => {
+        if (!roomInitialized || !roomRef.current) return;
+        
+        const room = roomRef.current;
+        
         const isCorrect = (isAI && yourVote === 'ai') || (!isAI && yourVote === 'human');
         const newStats = {
           ...stats,
@@ -558,11 +616,20 @@
         setStats(newStats);
         
         // Update in database
-        room.collection('player_stats').create({
-          username: room.peers[room.clientId].username,
-          avatarUrl: room.peers[room.clientId].avatarUrl,
-          ...newStats
-        });
+        try {
+          const username = room.peers && room.clientId && room.peers[room.clientId] ? 
+                           room.peers[room.clientId].username : "Unknown User";
+          const avatarUrl = room.peers && room.clientId && room.peers[room.clientId] ? 
+                            room.peers[room.clientId].avatarUrl : "https://images.websim.ai/avatar/default_user";
+          
+          room.collection('player_stats').create({
+            username: username,
+            avatarUrl: avatarUrl,
+            ...newStats
+          });
+        } catch (error) {
+          console.error("Error updating player stats:", error);
+        }
       };
       
       const resetGame = () => {
@@ -576,10 +643,12 @@
         setGameResults(null);
         
         // Update presence to show we're in the lobby again
-        room.updatePresence({
-          status: 'lobby',
-          joinedAt: new Date().getTime()
-        });
+        if (roomInitialized && roomRef.current) {
+          roomRef.current.updatePresence({
+            status: 'lobby',
+            joinedAt: new Date().getTime()
+          });
+        }
         
         // Start the lobby countdown timer again
         startLobbyCountdown();
@@ -622,7 +691,7 @@
             </div>
           )}
           
-          {view === 'game' && (
+          {view === 'game' && pairedWith && (
             <div className="game">
               <h2>Chatting with {pairedWith.username}</h2>
               <div className="timer">Time Left: {timeLeft} seconds</div>
@@ -655,7 +724,7 @@
             </div>
           )}
           
-          {view === 'voting' && (
+          {view === 'voting' && pairedWith && (
             <div className="voting">
               <h2>Time's Up!</h2>
               <p>Was {pairedWith.username} a human or an AI?</p>
